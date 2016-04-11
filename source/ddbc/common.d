@@ -80,9 +80,10 @@ static void myRemove(T)(ref T[] array, size_t index) {
 }
 
 // TODO: implement limits
-// TODO: thread safety
 class ConnectionPoolDataSourceImpl : DataSourceImpl, ConnectionCloseHandler {
 private:
+	Object lock = new Object;
+
 	int maxPoolSize;
 	int timeToLive;
 	int waitTimeOut;
@@ -99,62 +100,68 @@ public:
 		this.waitTimeOut = waitTimeOut;
 	}
 
-	override Connection getConnection() {
-		Connection conn = null;
-        //writeln("getConnection(): freeConnections.length = " ~ to!string(freeConnections.length));
-        if (freeConnections.length > 0) {
-            //writeln("getConnection(): returning free connection");
-            conn = freeConnections[freeConnections.length - 1]; // $ - 1
-            auto oldSize = freeConnections.length;
-            myRemove(freeConnections, freeConnections.length - 1);
-            //freeConnections.length = oldSize - 1; // some bug in remove? length is not decreased...
-            auto newSize = freeConnections.length;
-            assert(newSize == oldSize - 1);
-        } else {
-            //writeln("getConnection(): creating new connection");
-            try {
-                conn = super.getConnection();
-            } catch (Throwable e) {
-                //writeln("exception while creating connection " ~ e.msg);
-                throw e;
+    override Connection getConnection() {
+        synchronized (lock) {
+            Connection conn = null;
+            //writeln("getConnection(): freeConnections.length = " ~ to!string(freeConnections.length));
+            if (freeConnections.length > 0) {
+                //writeln("getConnection(): returning free connection");
+                conn = freeConnections[freeConnections.length - 1]; // $ - 1
+                auto oldSize = freeConnections.length;
+                myRemove(freeConnections, freeConnections.length - 1);
+                //freeConnections.length = oldSize - 1; // some bug in remove? length is not decreased...
+                auto newSize = freeConnections.length;
+                assert(newSize == oldSize - 1);
+            } else {
+                //writeln("getConnection(): creating new connection");
+                try {
+                    conn = super.getConnection();
+                } catch (Throwable e) {
+                    //writeln("exception while creating connection " ~ e.msg);
+                    throw e;
+                }
+                //writeln("getConnection(): connection created");
             }
-            //writeln("getConnection(): connection created");
+            auto oldSize = activeConnections.length;
+            activeConnections ~= conn;
+            auto newSize = activeConnections.length;
+            assert(oldSize == newSize - 1);
+            auto wrapper = new ConnectionWrapper(this, conn);
+            return wrapper;
         }
-        auto oldSize = activeConnections.length;
-        activeConnections ~= conn;
-        auto newSize = activeConnections.length;
-        assert(oldSize == newSize - 1);
-        auto wrapper = new ConnectionWrapper(this, conn);
-		return wrapper;
-	}
+    }
 
-	void removeUsed(Connection connection) {
-        //writeln("removeUsed");
-        //writeln("removeUsed - activeConnections.length=" ~ to!string(activeConnections.length));
-		foreach (i, item; activeConnections) {
-			if (item == connection) {
-                auto oldSize = activeConnections.length;
-				//std.algorithm.remove(activeConnections, i);
-                myRemove(activeConnections, i);
-                //activeConnections.length = oldSize - 1;
-                auto newSize = activeConnections.length;
-                assert(oldSize == newSize + 1);
-                return;
-			}
-		}
-		throw new SQLException("Connection being closed is not found in pool");
-	}
+    void removeUsed(Connection connection) {
+        synchronized (lock) {
+            //writeln("removeUsed");
+            //writeln("removeUsed - activeConnections.length=" ~ to!string(activeConnections.length));
+            foreach (i, item; activeConnections) {
+                if (item == connection) {
+                    auto oldSize = activeConnections.length;
+                    //std.algorithm.remove(activeConnections, i);
+                    myRemove(activeConnections, i);
+                    //activeConnections.length = oldSize - 1;
+                    auto newSize = activeConnections.length;
+                    assert(oldSize == newSize + 1);
+                    return;
+                }
+            }
+            throw new SQLException("Connection being closed is not found in pool");
+        }
+    }
 
-	override void onConnectionClosed(Connection connection) {
-        //writeln("onConnectionClosed");
-        assert(connection !is null);
-        //writeln("calling removeUsed");
-        removeUsed(connection);
-        //writeln("adding to free list");
-        auto oldSize = freeConnections.length;
-        freeConnections ~= connection;
-        auto newSize = freeConnections.length;
-        assert(newSize == oldSize + 1);
+    override void onConnectionClosed(Connection connection) {
+        synchronized (lock) {
+            //writeln("onConnectionClosed");
+            assert(connection !is null);
+            //writeln("calling removeUsed");
+            removeUsed(connection);
+            //writeln("adding to free list");
+            auto oldSize = freeConnections.length;
+            freeConnections ~= connection;
+            auto newSize = freeConnections.length;
+            assert(newSize == oldSize + 1);
+        }
     }
 }
 
